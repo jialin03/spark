@@ -318,7 +318,16 @@ class BlockMatrixSuite extends SparkFunSuite with MLlibTestSparkContext {
     val B = new BlockMatrix(rdd, colPerPart, rowPerPart)
     val resultPartitioner = GridPartitioner(gridBasedMat.numRowBlocks, B.numColBlocks,
       math.max(numPartitions, 2))
+
+    /* A.numRowBlocks=3, B.numColBlocks=2, partition=3
+     * resultRowsPerpart = math.round(math.max(1/math.sqrt(3) * 3, 1.0)).toInt =2
+     * resultColsPerpart = math.round(math.max(1/math.sqrt(3) * 2, 1.0)).toInt =1
+     * resultPartitioner = GridPartioner(3, 2, 3)
+     *
+     * */
+
     val (destinationsA, destinationsB) = gridBasedMat.simulateMultiply(B, resultPartitioner)
+
     assert(destinationsA((0, 0)) === Set(0))
     assert(destinationsA((0, 1)) === Set(2))
     assert(destinationsA((1, 0)) === Set(0))
@@ -327,6 +336,80 @@ class BlockMatrixSuite extends SparkFunSuite with MLlibTestSparkContext {
     assert(destinationsB((0, 0)) === Set(0))
     assert(destinationsB((1, 1)) === Set(2, 3))
   }
+
+
+  test("simulate transMultiply") {
+    val blockA: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 2.0))),
+      ((0, 1), new DenseMatrix(2, 2, Array(3.0, 1.0, 0.0, 1.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(0.0, 0.0, 1.0, 0.0))),
+      ((1, 1), new DenseMatrix(2, 2, Array(1.0, 0.0, 2.0, 1.0))),
+      ((1, 2), new DenseMatrix(2, 1, Array(1.0, 5.0))))
+    val rddA = sc.parallelize(blockA, numPartitions)
+    val A = new BlockMatrix(rddA, rowPerPart, colPerPart)
+
+    val blocks: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 1.0))),
+      ((1, 1), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 1.0))))
+    val rdd = sc.parallelize(blocks, 2)
+    val B = new BlockMatrix(rdd, rowPerPart, colPerPart)
+    val resultPartitioner = GridPartitioner(A.numColBlocks, B.numColBlocks,
+      math.max(numPartitions, 2))
+
+    // res=Gridpartitioner(3, 2, 3)
+
+    val (destinationsA, destinationsB) = A.simulateTransMultiply(B, resultPartitioner)
+    assert(destinationsA((0, 0)) === Set(0))
+    assert(destinationsA((0, 1)) === Set(0))
+    assert(destinationsA((1, 0)) === Set(2))
+    assert(destinationsA((1, 1)) === Set(2))
+    assert(destinationsA((1, 2)) === Set(3))
+    assert(destinationsB((0, 0)) === Set(0))
+    assert(destinationsB((1, 1)) === Set(2, 3))
+  }
+
+  test("multiplyByOneCol") {
+    val blockA: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(0.0, 1.0))),
+      ((0, 1), new DenseMatrix(2, 1, Array(5.0, 7.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(2.0, 3.0))),
+      ((1, 1), new DenseMatrix(2, 1, Array(11.0, 13.0))))
+
+    val rddA = sc.parallelize(blockA, 4)   // num of partition
+    val A = new BlockMatrix(rddA, 2, 1)    // rowsPerBlock, colsPerBlock
+
+    val blockAA: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 1.0, 0.0, 1.0))),
+      ((0, 1), new DenseMatrix(2, 1, Array(5.0, 7.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(1.0, 1.0, 2.0, 3.0))),
+      ((1, 1), new DenseMatrix(2, 1, Array(11.0, 13.0))))
+
+    val rddAA = sc.parallelize(blockAA, 4)
+    val AA = new BlockMatrix(rddAA, 2, 2)
+
+    val blockW: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(1.0, 2.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(3.0, 4.0))))
+    val rddW = sc.parallelize(blockW, 2)
+    val W = new BlockMatrix(rddW, 2, 1)
+
+/*
+    val blockW: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(1.0, 2.0))),
+      ((0, 1), new DenseMatrix(2, 1, Array(1.0, 2.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(3.0, 4.0))),
+      ((1, 1), new DenseMatrix(2, 1, Array(3.0, 4.0))))
+    val rddW = sc.parallelize(blockW, 2)
+    val W = new BlockMatrix(rddW, 2, 1)
+    */
+
+    val expected = new DenseMatrix(4, 3,
+      Array(1.0, 2.0, 3.0, 4.0, 0.0, 2.0, 6.0, 12.0, 5.0, 14.0, 33.0, 52.0))
+    val res = AA.elementWiseMultiplyOneCol(W).toLocalMatrix()
+    val r = new DenseMatrix (res.numRows, res.numCols, res.toArray)
+    assert (expected ~== r absTol 1e-4)
+  }
+
 
   test("validate") {
     // No error

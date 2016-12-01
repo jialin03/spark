@@ -323,6 +323,7 @@ class DenseMatrix @Since("2.0.0") (
       }
     }
   }
+
 }
 
 /**

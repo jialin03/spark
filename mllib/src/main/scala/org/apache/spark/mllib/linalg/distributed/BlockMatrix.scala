@@ -269,7 +269,6 @@ class BlockMatrix @Since("1.3.0") (
   @Since("1.3.0")
   def toIndexedRowMatrix(): IndexedRowMatrix = {
     val cols = numCols().toInt
-
     require(cols < Int.MaxValue, s"The number of columns should be less than Int.MaxValue ($cols).")
 
     val rows = blocks.flatMap { case ((blockRowIdx, blockColIdx), mat) =>
@@ -292,6 +291,7 @@ class BlockMatrix @Since("1.3.0") (
       }
       new IndexedRow(rowIdx, Vectors.fromBreeze(wholeVector))
     }
+
     new IndexedRowMatrix(rows)
   }
 
@@ -470,6 +470,7 @@ class BlockMatrix @Since("1.3.0") (
         val destinations = leftDestinations.getOrElse((blockRowIndex, blockColIndex), Set.empty)
         destinations.map(j => (j, (blockRowIndex, blockColIndex, block)))
       }
+
       // Each block of B must be multiplied with the corresponding blocks in each row of A.
       val flatB = other.blocks.flatMap { case ((blockRowIndex, blockColIndex), block) =>
         val destinations = rightDestinations.getOrElse((blockRowIndex, blockColIndex), Set.empty)
@@ -495,4 +496,114 @@ class BlockMatrix @Since("1.3.0") (
         s"A.colsPerBlock: $colsPerBlock, B.rowsPerBlock: ${other.rowsPerBlock}")
     }
   }
+
+
+  private[distributed] def simulateTransMultiply
+  (other: BlockMatrix, partitioner: GridPartitioner): (BlockDestinations, BlockDestinations) = {
+    val leftMatrix = blockInfo.keys.collect() // blockInfo should already be cached
+    val rightMatrix = other.blocks.keys.collect()
+
+    // exchange colIndex and b, since left matrix will be transposed
+
+    val rightCounterpartsHelper = rightMatrix.groupBy(_._1).mapValues(_.map(_._2))
+    val leftDestinations = leftMatrix.map { case (rowIndex, colIndex) =>
+      val rightCounterparts = rightCounterpartsHelper.getOrElse(rowIndex, Array())
+      val partitions = rightCounterparts.map(b => partitioner.getPartition((colIndex, b)))
+      ((rowIndex, colIndex), partitions.toSet)
+    }.toMap
+
+    val leftCounterpartsHelper = leftMatrix.groupBy(_._1).mapValues(_.map(_._2))
+    val rightDestinations = rightMatrix.map { case (rowIndex, colIndex) =>
+      val leftCounterparts = leftCounterpartsHelper.getOrElse(rowIndex, Array())
+      val partitions = leftCounterparts.map(b => partitioner.getPartition((b, colIndex)))
+      ((rowIndex, colIndex), partitions.toSet)
+    }.toMap
+
+    (leftDestinations, rightDestinations)
+  }
+
+  /*
+  A^T * B
+   */
+
+  def transMultiply(other: BlockMatrix): BlockMatrix = {
+    require(numRows() == other.numRows(), "The number of rows of A and the number of rows " +
+      s"of B must be equal. A.numRows: ${numRows()}, B.numRows: ${other.numRows()}. If you " +
+      "think they should be equal, try setting the dimensions of A and B explicitly while " +
+      "initializing them.")
+    if (rowsPerBlock == other.rowsPerBlock) {
+      val resultPartitioner = GridPartitioner(numColBlocks, other.numColBlocks,
+        math.max(blocks.partitions.length, other.blocks.partitions.length))
+      val (leftDestinations, rightDestinations) = simulateTransMultiply(other, resultPartitioner)
+
+      // Each block of A must be multiplied with the corresponding blocks in the columns of B.
+      val flatA = blocks.flatMap { case ((blockRowIndex, blockColIndex), block) =>
+        val destinations = leftDestinations.getOrElse((blockRowIndex, blockColIndex), Set.empty)
+        destinations.map(j => (j, (blockRowIndex, blockColIndex, block)))
+      }
+      // Each block of B must be multiplied with the corresponding blocks in the columns of A.
+      val flatB = other.blocks.flatMap { case ((blockRowIndex, blockColIndex), block) =>
+        val destinations = rightDestinations.getOrElse((blockRowIndex, blockColIndex), Set.empty)
+        destinations.map(j => (j, (blockRowIndex, blockColIndex, block)))
+      }
+      val newBlocks = flatA.cogroup(flatB, resultPartitioner).flatMap { case (pId, (a, b)) =>
+        a.flatMap { case (leftRowIndex, leftColIndex, leftBlock) =>
+          b.filter(_._1 == leftRowIndex).map { case (rightRowIndex, rightColIndex, rightBlock) =>
+            val C = rightBlock match {
+              case dense: DenseMatrix => leftBlock.transpose.multiply(dense)
+              case sparse: SparseMatrix => leftBlock.transpose.multiply(sparse.toDense)
+              case _ =>
+                throw new SparkException(s"Unrecognized matrix type ${rightBlock.getClass}.")
+            }
+            ((leftColIndex, rightColIndex), C.asBreeze)
+          }
+        }
+      }.reduceByKey(resultPartitioner, (a, b) => a + b).mapValues(Matrices.fromBreeze)
+      // TODO: Try to use aggregateByKey instead of reduceByKey to get rid of intermediate matrices
+      new BlockMatrix(newBlocks, colsPerBlock, other.colsPerBlock, numCols(), other.numCols())
+    } else {
+      throw new SparkException("rowsPerBlock of A doesn't match rowsPerBlock of B. " +
+        s"A.rowsPerBlock: $rowsPerBlock, B.rowsPerBlock: ${other.rowsPerBlock}")
+    }
+  }
+
+  /*
+  def elementWiseMultiply(other: BlockMatrix): BlockMatrix = {
+    blockMap(other, (x: BM[Double], y: BM[Double]) => x :* y)
+  }
+  */
+
+  /*
+   * For given matrices `this` and `other` of compatible dimensions and compatible block dimensions,
+   * it applies a binary function on their corresponding blocks.
+   * 'other' is a a one column matrix, with the same rows of 'this'
+   *
+   * @param other The second BlockMatrix argument for the operator specified by `binMap`
+   * @param binMap A function taking two breeze matrices and returning a breeze matrix
+   * @return A [[BlockMatrix]] whose blocks are the results of a specified binary map on blocks
+   *         of `this` and `other`.
+ */
+
+  def blockMapOneCol(
+                       other: BlockMatrix,
+                       binMap: (Matrix, Matrix) => Matrix): BlockMatrix = {
+    val helper = other.blocks.collect().groupBy(_._1._1)
+    // helper Map(Int, Array[(Int, int), Matrix])
+
+    val newBlocks = blocks.map { case ((blockRowIndex, blockColIndex), x) =>
+      val rightMatrix = helper(blockRowIndex)(0)._2
+      val res = binMap(x, rightMatrix)
+      new MatrixBlock((blockRowIndex, blockColIndex), res)
+    }
+    new BlockMatrix(newBlocks, rowsPerBlock, colsPerBlock, numRows(), numCols())
+  }
+
+  /*
+  A.*W=AW, A is a n*m blockMatrix, W is a n*1 blockMatrix
+   */
+
+  def elementWiseMultiplyOneCol(other: BlockMatrix): BlockMatrix = {
+    blockMapOneCol(other, (x: Matrix, y: Matrix) => x.multiplyCol(y))
+  }
+
 }

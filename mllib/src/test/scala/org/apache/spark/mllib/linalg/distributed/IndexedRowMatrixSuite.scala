@@ -38,6 +38,7 @@ class IndexedRowMatrixSuite extends SparkFunSuite with MLlibTestSparkContext {
   override def beforeAll() {
     super.beforeAll()
     indexedRows = sc.parallelize(data, 2)
+
   }
 
   test("size") {

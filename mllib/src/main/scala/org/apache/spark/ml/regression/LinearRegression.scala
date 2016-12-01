@@ -31,14 +31,15 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.ml.feature.Instance
 import org.apache.spark.ml.linalg.{Vector, Vectors}
 import org.apache.spark.ml.linalg.BLAS._
-import org.apache.spark.ml.optim.WeightedLeastSquares
+import org.apache.spark.ml.optim._
 import org.apache.spark.ml.PredictorParams
 import org.apache.spark.ml.param.ParamMap
 import org.apache.spark.ml.param.shared._
 import org.apache.spark.ml.util._
 import org.apache.spark.mllib.evaluation.RegressionMetrics
-import org.apache.spark.mllib.linalg.{Vectors => OldVectors}
+import org.apache.spark.mllib.linalg.{Matrices, Vectors => OldVectors}
 import org.apache.spark.mllib.linalg.VectorImplicits._
+import org.apache.spark.mllib.linalg.distributed._
 import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
@@ -195,6 +196,52 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
         "solver is used.'")
       // For low dimensional data, WeightedLeastSquares is more efficiently since the
       // training algorithm only requires one pass through the data. (SPARK-10668)
+
+
+      val df = dataset.select(col($(labelCol)).cast(DoubleType), w, col($(featuresCol)))
+
+      val wSum = dataset.select(w).rdd.map(_(0).asInstanceOf[Double]).reduce(_ + _)
+      // val wSum = dataset.select(w).agg(sum(w)).first().get(0)
+      val bStd = 1.0
+      val aVar = Vectors.zeros(numFeatures)
+      val rrIndex = df.rdd.zipWithIndex()
+
+      val Ar = rrIndex.map {
+        case (Row(label: Double, weight: Double, features: Vector), index: Long)
+        => IndexedRow(index, features)
+      }
+
+      val A = new IndexedRowMatrix(Ar).toBlockMatrix()
+
+      val Wr = rrIndex.map {
+        case (Row(label: Double, weight: Double, features: Vector), index: Long)
+        => val weightVector = Vectors.dense(weight)
+          IndexedRow(index, weightVector)
+      }
+      val W = new IndexedRowMatrix(Wr).toBlockMatrix()
+
+      val Br = rrIndex.map {
+        case (Row(label: Double, weight: Double, features: Vector), index: Long)
+        => val labelVector = Vectors.dense(label)
+          IndexedRow(index, labelVector)
+      }
+      val B = new IndexedRowMatrix(Br).toBlockMatrix()
+     // val t1 = System.nanoTime()
+      val optimizerM = new WLSMatrix($(fitIntercept), $(regParam), $(standardization), true)
+      val modelM = optimizerM.fit(A, B, W, bStd, aVar, wSum)
+      val lrM = copyValues(new LinearRegressionModel(uid, modelM.coefficients, modelM.intercept))
+      val (summaryModel, predictionColName) = lrM.findSummaryModelAndPredictionCol()
+      val trainingSummary = new LinearRegressionTrainingSummary(
+        summaryModel.transform(dataset),
+        predictionColName,
+        $(labelCol),
+        $(featuresCol),
+        summaryModel,
+        modelM.diagInvAtWA.toArray,
+        Array(0D))
+     // val t2 = System.nanoTime()
+      return lrM.setSummary(trainingSummary)
+/*
       val instances: RDD[Instance] = dataset.select(
         col($(labelCol)).cast(DoubleType), w, col($(featuresCol))).rdd.map {
           case Row(label: Double, weight: Double, features: Vector) =>
@@ -209,6 +256,7 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
       val lrModel = copyValues(new LinearRegressionModel(uid, model.coefficients, model.intercept))
       // WeightedLeastSquares does not run through iterations. So it does not generate
       // an objective history.
+
       val (summaryModel, predictionColName) = lrModel.findSummaryModelAndPredictionCol()
       val trainingSummary = new LinearRegressionTrainingSummary(
         summaryModel.transform(dataset),
@@ -220,6 +268,7 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
         Array(0D))
 
       return lrModel.setSummary(trainingSummary)
+      */
     }
 
     val instances: RDD[Instance] =

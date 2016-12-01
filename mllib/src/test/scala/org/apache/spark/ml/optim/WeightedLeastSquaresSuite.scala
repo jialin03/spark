@@ -21,8 +21,12 @@ import org.apache.spark.SparkFunSuite
 import org.apache.spark.ml.feature.Instance
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.util.TestingUtils._
+import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix}
+import org.apache.spark.mllib.linalg.distributed.BlockMatrix
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.rdd.RDD
+
+
 
 class WeightedLeastSquaresSuite extends SparkFunSuite with MLlibTestSparkContext {
 
@@ -59,6 +63,88 @@ class WeightedLeastSquaresSuite extends SparkFunSuite with MLlibTestSparkContext
       Instance(17.0, 4.0, Vectors.dense(3.0, 13.0))
     ), 2)
   }
+
+
+  test("WLSMatrix") {
+    val blockA: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(0.0, 1.0))),
+      ((0, 1), new DenseMatrix(2, 1, Array(5.0, 7.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(2.0, 3.0))),
+      ((1, 1), new DenseMatrix(2, 1, Array(11.0, 13.0))))
+
+    val rddA = sc.parallelize(blockA, 4)   // num of partition
+    val A = new BlockMatrix(rddA, 2, 1)    // rowsPerBlock, colsPerBlock
+
+    val blockAA: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 1.0, 0.0, 1.0))),
+      ((0, 1), new DenseMatrix(2, 1, Array(5.0, 7.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(1.0, 1.0, 2.0, 3.0))),
+      ((1, 1), new DenseMatrix(2, 1, Array(11.0, 13.0))))
+
+    val rddAA = sc.parallelize(blockAA, 4)   // num of partition
+    val AA = new BlockMatrix(rddAA, 2, 2)    // rowsPerBlock, colsPerBlock
+
+    val blockW: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(1.0, 2.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(3.0, 4.0))))
+    val rddW = sc.parallelize(blockW, 2)
+    val W = new BlockMatrix(rddW, 2, 1)
+
+
+/*
+    val blockW: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 2, Array(1.0, 0.0, 0.0, 2.0))),
+      ((0, 1), new DenseMatrix(2, 2, Array(0.0, 0.0, 0.0, 0.0))),
+      ((1, 0), new DenseMatrix(2, 2, Array(0.0, 0.0, 0.0, 0.0))),
+      ((1, 1), new DenseMatrix(2, 2, Array(3.0, 0.0, 0.0, 4.0))))
+    val rddW = sc.parallelize(blockW, 4)
+    val W = new BlockMatrix(rddW, 2, 2)
+    */
+
+
+
+    val blockB: Seq[((Int, Int), Matrix)] = Seq(
+      ((0, 0), new DenseMatrix(2, 1, Array(17.0, 19.0))),
+      ((1, 0), new DenseMatrix(2, 1, Array(23.0, 29.0))))
+    val rddB = sc.parallelize(blockB, 4)
+    val B = new BlockMatrix(rddB, 2, 1)
+
+    val expect = Vectors.dense(0.0, -3.727121, 3.009983)
+    val aVar = Vectors.dense(1.0, 1.0)
+    val aVar2 = Vectors.dense(1.0, 1.0, 1.0)
+    val aVar3 = Vectors.dense(0.0, 1.0, 8.04)
+    // val aVar4 = Vectors.dense(1.0, 1.0, 1.0)
+    val bStd = 4.4944
+    val wSum = 10.0
+
+    val wls = new WLSMatrix(false, 0.0, false, false).fit(A, B, W, bStd, aVar, wSum)
+    val actual = Vectors.dense(wls.intercept, wls.coefficients(0), wls.coefficients(1))
+    assert(actual ~== expect absTol 1e-3)
+
+
+    val expect2 = Vectors.dense(18.08, 6.08, -0.60)
+    val wls2 = new WLSMatrix(true, 0.0, false, false).fit(AA, B, W, bStd, aVar2, wSum)
+    val actual2 = Vectors.dense(wls2.intercept, wls2.coefficients(0), wls2.coefficients(1))
+    assert(actual2 ~== expect2 absTol 1e-3)
+
+   // val expect5 = Vectors.dense(10.1238013, 0.9708569, 1.1475466)
+   // val wls5 = new WLSMatrix(true, 1.0, false, true).fit(AA, B, W, bStd, aVar3, wSum)
+   // val actual5 = Vectors.dense(wls5.intercept, wls5.coefficients(0), wls5.coefficients(1))
+   // assert(actual5 ~== expect5 absTol 1e-3)
+
+    val expect3 = Vectors.dense(14.064629, 3.565802, 0.269593)
+    val wls3 = new WLSMatrix(true, 0.1, true, true).fit(AA, B, W, bStd, aVar3, wSum)
+    val actual3 = Vectors.dense(wls3.intercept, wls3.coefficients(0), wls3.coefficients(1))
+    assert(actual3 ~== expect3 absTol 1e-3)
+
+    val expect4 = Vectors.dense(13.1860638, 2.1761382, 0.6213134)
+    val wls4 = new WLSMatrix(true, 1.0, true, true).fit(AA, B, W, bStd, aVar3, wSum)
+    val actual4 = Vectors.dense(wls4.intercept, wls4.coefficients(0), wls4.coefficients(1))
+    assert(actual4 ~== expect4 absTol 1e-3)
+  }
+
+
+
 
   test("WLS against lm") {
     /*

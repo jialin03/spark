@@ -21,6 +21,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.ml.feature.Instance
 import org.apache.spark.ml.linalg._
 import org.apache.spark.mllib.linalg.CholeskyDecomposition
+import org.apache.spark.mllib.linalg.distributed.BlockMatrix
 import org.apache.spark.rdd.RDD
 
 /**
@@ -38,6 +39,86 @@ private[ml] class WeightedLeastSquaresModel(
     BLAS.dot(coefficients, features) + intercept
   }
 }
+
+private[ml] class WLSMatrix (
+  val fitIntercept: Boolean, val regParam: Double, val standardizeFeatures: Boolean,
+  val standardizeLabel: Boolean) extends Logging with Serializable {
+
+  require(regParam >= 0.0, s"regParam cannot be negative: $regParam")
+  if (regParam == 0.0) {
+    logWarning("regParam is zero, which might cause numerical instability and overfitting.")
+  }
+
+  def fit(A: BlockMatrix, B: BlockMatrix, W: BlockMatrix,
+                     bStd: Double, aVar: Vector, wSum: Double): WeightedLeastSquaresModel = {
+
+    val AW = A.elementWiseMultiplyOneCol(W)
+    val BW = B.elementWiseMultiplyOneCol(W)
+    val atwa = A.transMultiply(AW).toLocalMatrix()  // m*m feature matrix
+    val atwb = A.transMultiply(BW).toLocalMatrix()  // m*1 label matrix
+    val atwaDense = new DenseMatrix(atwa.numRows, atwa.numCols, atwa.toArray)
+    val atwbDense = new DenseMatrix(atwb.numRows, atwb.numCols, atwb.toArray)
+    val m = aVar.size
+
+    if(regParam != 0.0) {
+      val copyVar = aVar.copy
+      var lamda = regParam * wSum // regularization parameter
+      if (standardizeLabel && bStd != 0.0) {
+        lamda /= bStd
+      }
+      // standardizeFeatures will take specific variance of each data, otherwise set to 1.0
+      if (standardizeFeatures) {
+        BLAS.scal(lamda, copyVar)
+        val aDiag = DenseMatrix.diag(copyVar)
+        BLAS.axpy(1.0, aDiag, atwaDense)
+      }
+      else {
+        val oneDiag = DenseMatrix.eye(m)
+        BLAS.axpy(lamda, oneDiag, atwaDense)
+      }
+    }
+
+    val len = (m + 1) * m / 2
+    val aTri = Array.ofDim[Double](len)   // uplevel Triangle of matrix atwaDense
+    var i = 0
+    var k = 0
+    while (i<m) {
+      var j = 0
+      while (j<=i) {
+        aTri(k) = atwaDense.apply(i, j)
+        j += 1
+        k += 1
+      }
+      i += 1
+    }
+    val bArr = Array.ofDim[Double](m)  // array of atwbDense
+    i = 0
+    while (i<m) {
+      bArr(i) = atwbDense.apply(i)
+      i += 1
+    }
+
+    val x = CholeskyDecomposition.solve(aTri, bArr)  // x is the coefficients array
+    val (coefficients, intercept) = if (fitIntercept) {
+      (new DenseVector(x.slice(1, x.length)), x.head)
+    } else {
+      (new DenseVector(x), 0.0)
+    }
+    // the upper triangle of the (symmetric) inverse of atwaDense
+
+    /*
+    val aaInv = CholeskyDecomposition.inverse(aTri, m)
+    val diagInvAtWA = new DenseVector((1 to m).map {
+      i => aaInv(i + (i - 1) * i / 2 - 1) / wSum }.toArray)
+    */
+    val diagInvAtWA = new DenseVector((1 to m).map {
+      i => atwaDense.apply(i-1, i-1) / wSum }.toArray)
+
+    new WeightedLeastSquaresModel(coefficients, intercept, diagInvAtWA)
+
+  }
+}
+
 
 /**
  * Weighted least squares solver via normal equation.

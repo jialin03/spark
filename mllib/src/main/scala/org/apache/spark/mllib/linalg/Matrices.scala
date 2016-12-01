@@ -117,6 +117,19 @@ sealed trait Matrix extends Serializable {
     output
   }
 
+  /**
+   * Matrix element-wise multiply to another one column matrix
+   */
+  def multiplyCol(y: Matrix) : Matrix = {
+    if (y.numCols!=1) throw new UnsupportedOperationException ("Matrix column number is not one")
+    else {
+      this match {
+        case dense: DenseMatrix => dense.elementWiseMultiplyCol(y)
+        case sparse: SparseMatrix => sparse.elementWiseMultiplyCol(y)
+      }
+    }
+  }
+
   /** A human readable representation of the matrix */
   override def toString: String = asBreeze.toString()
 
@@ -432,6 +445,49 @@ class DenseMatrix @Since("1.3.0") (
   override def asML: newlinalg.DenseMatrix = {
     new newlinalg.DenseMatrix(numRows, numCols, values, isTransposed)
   }
+
+
+  def inverse: DenseMatrix = {
+    this
+  }
+
+  /*
+   * x should have the same number of rows but 1 column only
+   * {{{              {{{           {{{
+   *   1.0 2.0           2.0            2.0   4.0
+   *   3.0 4.0   :*      4.0    =      12.0  16.0
+   *   5.0 6.0           6.0           30.0  36.0
+   * }}}              }}}           }}}
+   */
+
+  def elementWiseMultiplyCol(x: Matrix): DenseMatrix = {
+    x match {
+      case dx: DenseMatrix =>
+        val len = values.length
+        var j = 0
+        while(j<len) {
+          val i = j % numRows  // rowIndex of j
+          values(j) *= dx.values(i)
+          j += 1
+        }
+        this
+
+       case sx: SparseMatrix =>
+        val len = values.length
+        var j = 0
+        while(j<len) {
+          val i = j % numRows  // rowIndex of j
+          if (sx.rowIndices.contains(i)) {
+            val index = sx.rowIndices.indexOf (i)  // value at rowIndex i
+            values(j) *= sx.values(index)
+          }
+          else values(j) = 0
+          j += 1
+        }
+        this
+    }
+  }
+
 }
 
 /**
@@ -748,6 +804,11 @@ class SparseMatrix @Since("1.3.0") (
   @Since("2.0.0")
   override def asML: newlinalg.SparseMatrix = {
     new newlinalg.SparseMatrix(numRows, numCols, colPtrs, rowIndices, values, isTransposed)
+  }
+
+
+  def elementWiseMultiplyCol(x: Matrix): SparseMatrix = {
+    this.toDense.elementWiseMultiplyCol(x).toSparse
   }
 }
 
