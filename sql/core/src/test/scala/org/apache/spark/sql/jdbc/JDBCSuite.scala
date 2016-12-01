@@ -24,13 +24,12 @@ import java.util.{Calendar, GregorianCalendar, Properties}
 import org.h2.jdbc.JdbcSQLException
 import org.scalatest.{BeforeAndAfter, PrivateMethodTester}
 
-import org.apache.spark.{SparkException, SparkFunSuite}
+import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.execution.DataSourceScanExec
 import org.apache.spark.sql.execution.command.ExplainCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
-import org.apache.spark.sql.execution.datasources.jdbc.JDBCRDD
-import org.apache.spark.sql.execution.datasources.jdbc.JdbcUtils
+import org.apache.spark.sql.execution.datasources.jdbc.{JDBCOptions, JDBCRDD, JDBCRelation, JdbcUtils}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types._
@@ -84,7 +83,7 @@ class JDBCSuite extends SparkFunSuite
         |CREATE TEMPORARY TABLE fetchtwo
         |USING org.apache.spark.sql.jdbc
         |OPTIONS (url '$url', dbtable 'TEST.PEOPLE', user 'testUser', password 'testPass',
-        |         ${JdbcUtils.JDBC_BATCH_FETCH_SIZE} '2')
+        |         ${JDBCOptions.JDBC_BATCH_FETCH_SIZE} '2')
       """.stripMargin.replaceAll("\n", " "))
 
     sql(
@@ -210,6 +209,16 @@ class JDBCSuite extends SparkFunSuite
     conn.close()
   }
 
+  // Check whether the tables are fetched in the expected degree of parallelism
+  def checkNumPartitions(df: DataFrame, expectedNumPartitions: Int): Unit = {
+    val jdbcRelations = df.queryExecution.analyzed.collect {
+      case LogicalRelation(r: JDBCRelation, _, _) => r
+    }
+    assert(jdbcRelations.length == 1)
+    assert(jdbcRelations.head.parts.length == expectedNumPartitions,
+      s"Expecting a JDBCRelation with $expectedNumPartitions partitions, but got:`$jdbcRelations`")
+  }
+
   test("SELECT *") {
     assert(sql("SELECT * FROM foobar").collect().size === 3)
   }
@@ -289,7 +298,7 @@ class JDBCSuite extends SparkFunSuite
     assert(names(2).equals("mary"))
   }
 
-  test("SELECT first field when fetchSize is two") {
+  test("SELECT first field when fetchsize is two") {
     val names = sql("SELECT NAME FROM fetchtwo").collect().map(x => x.getString(0)).sortWith(_ < _)
     assert(names.size === 3)
     assert(names(0).equals("fred"))
@@ -305,7 +314,7 @@ class JDBCSuite extends SparkFunSuite
     assert(ids(2) === 3)
   }
 
-  test("SELECT second field when fetchSize is two") {
+  test("SELECT second field when fetchsize is two") {
     val ids = sql("SELECT THEID FROM fetchtwo").collect().map(x => x.getInt(0)).sortWith(_ < _)
     assert(ids.size === 3)
     assert(ids(0) === 1)
@@ -314,13 +323,23 @@ class JDBCSuite extends SparkFunSuite
   }
 
   test("SELECT * partitioned") {
-    assert(sql("SELECT * FROM parts").collect().size == 3)
+    val df = sql("SELECT * FROM parts")
+    checkNumPartitions(df, expectedNumPartitions = 3)
+    assert(df.collect().length == 3)
   }
 
   test("SELECT WHERE (simple predicates) partitioned") {
-    assert(sql("SELECT * FROM parts WHERE THEID < 1").collect().size === 0)
-    assert(sql("SELECT * FROM parts WHERE THEID != 2").collect().size === 2)
-    assert(sql("SELECT THEID FROM parts WHERE THEID = 1").collect().size === 1)
+    val df1 = sql("SELECT * FROM parts WHERE THEID < 1")
+    checkNumPartitions(df1, expectedNumPartitions = 3)
+    assert(df1.collect().length === 0)
+
+    val df2 = sql("SELECT * FROM parts WHERE THEID != 2")
+    checkNumPartitions(df2, expectedNumPartitions = 3)
+    assert(df2.collect().length === 2)
+
+    val df3 = sql("SELECT THEID FROM parts WHERE THEID = 1")
+    checkNumPartitions(df3, expectedNumPartitions = 3)
+    assert(df3.collect().length === 1)
   }
 
   test("SELECT second field partitioned") {
@@ -352,10 +371,10 @@ class JDBCSuite extends SparkFunSuite
       urlWithUserAndPass, "TEST.PEOPLE", new Properties()).collect().length === 3)
   }
 
-  test("Basic API with illegal FetchSize") {
+  test("Basic API with illegal fetchsize") {
     val properties = new Properties()
-    properties.setProperty(JdbcUtils.JDBC_BATCH_FETCH_SIZE, "-1")
-    val e = intercept[SparkException] {
+    properties.setProperty(JDBCOptions.JDBC_BATCH_FETCH_SIZE, "-1")
+    val e = intercept[IllegalArgumentException] {
       spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", properties).collect()
     }.getMessage
     assert(e.contains("Invalid value `-1` for parameter `fetchsize`"))
@@ -364,31 +383,34 @@ class JDBCSuite extends SparkFunSuite
   test("Basic API with FetchSize") {
     (0 to 4).foreach { size =>
       val properties = new Properties()
-      properties.setProperty(JdbcUtils.JDBC_BATCH_FETCH_SIZE, size.toString)
+      properties.setProperty(JDBCOptions.JDBC_BATCH_FETCH_SIZE, size.toString)
       assert(spark.read.jdbc(
         urlWithUserAndPass, "TEST.PEOPLE", properties).collect().length === 3)
     }
   }
 
   test("Partitioning via JDBCPartitioningInfo API") {
-    assert(
-      spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", "THEID", 0, 4, 3, new Properties())
-      .collect().length === 3)
+    val df = spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", "THEID", 0, 4, 3, new Properties())
+    checkNumPartitions(df, expectedNumPartitions = 3)
+    assert(df.collect().length === 3)
   }
 
   test("Partitioning via list-of-where-clauses API") {
     val parts = Array[String]("THEID < 2", "THEID >= 2")
-    assert(spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", parts, new Properties())
-      .collect().length === 3)
+    val df = spark.read.jdbc(urlWithUserAndPass, "TEST.PEOPLE", parts, new Properties())
+    checkNumPartitions(df, expectedNumPartitions = 2)
+    assert(df.collect().length === 3)
   }
 
   test("Partitioning on column that might have null values.") {
-    assert(
-      spark.read.jdbc(urlWithUserAndPass, "TEST.EMP", "theid", 0, 4, 3, new Properties())
-        .collect().length === 4)
-    assert(
-      spark.read.jdbc(urlWithUserAndPass, "TEST.EMP", "THEID", 0, 4, 3, new Properties())
-        .collect().length === 4)
+    val df = spark.read.jdbc(urlWithUserAndPass, "TEST.EMP", "theid", 0, 4, 3, new Properties())
+    checkNumPartitions(df, expectedNumPartitions = 3)
+    assert(df.collect().length === 4)
+
+    val df2 = spark.read.jdbc(urlWithUserAndPass, "TEST.EMP", "THEID", 0, 4, 3, new Properties())
+    checkNumPartitions(df2, expectedNumPartitions = 3)
+    assert(df2.collect().length === 4)
+
     // partitioning on a nullable quoted column
     assert(
       spark.read.jdbc(urlWithUserAndPass, "TEST.EMP", """"Dept"""", 0, 4, 3, new Properties())
@@ -405,6 +427,7 @@ class JDBCSuite extends SparkFunSuite
       numPartitions = 0,
       connectionProperties = new Properties()
     )
+    checkNumPartitions(res, expectedNumPartitions = 1)
     assert(res.count() === 8)
   }
 
@@ -418,6 +441,7 @@ class JDBCSuite extends SparkFunSuite
       numPartitions = 10,
       connectionProperties = new Properties()
     )
+    checkNumPartitions(res, expectedNumPartitions = 4)
     assert(res.count() === 8)
   }
 
@@ -431,6 +455,7 @@ class JDBCSuite extends SparkFunSuite
       numPartitions = 4,
       connectionProperties = new Properties()
     )
+    checkNumPartitions(res, expectedNumPartitions = 1)
     assert(res.count() === 8)
   }
 
@@ -451,7 +476,9 @@ class JDBCSuite extends SparkFunSuite
   }
 
   test("SELECT * on partitioned table with a nullable partition column") {
-    assert(sql("SELECT * FROM nullparts").collect().size == 4)
+    val df = sql("SELECT * FROM nullparts")
+    checkNumPartitions(df, expectedNumPartitions = 3)
+    assert(df.collect().length == 4)
   }
 
   test("H2 integral types") {
@@ -620,6 +647,8 @@ class JDBCSuite extends SparkFunSuite
     assert(doCompileFilter(GreaterThan("col0", 3)) === "col0 > 3")
     assert(doCompileFilter(GreaterThanOrEqual("col0", 3)) === "col0 >= 3")
     assert(doCompileFilter(In("col1", Array("jkl"))) === "col1 IN ('jkl')")
+    assert(doCompileFilter(In("col1", Array.empty)) ===
+      "CASE WHEN col1 IS NULL THEN NULL ELSE FALSE END")
     assert(doCompileFilter(Not(In("col1", Array("mno", "pqr"))))
       === "(NOT (col1 IN ('mno', 'pqr')))")
     assert(doCompileFilter(IsNull("col1")) === "col1 IS NULL")
@@ -721,7 +750,8 @@ class JDBCSuite extends SparkFunSuite
     }
     // test the JdbcRelation toString output
     df.queryExecution.analyzed.collect {
-      case r: LogicalRelation => assert(r.relation.toString == "JDBCRelation(TEST.PEOPLE)")
+      case r: LogicalRelation =>
+        assert(r.relation.toString == "JDBCRelation(TEST.PEOPLE) [numPartitions=3]")
     }
   }
 
@@ -730,6 +760,38 @@ class JDBCSuite extends SparkFunSuite
     val explain = ExplainCommand(df.queryExecution.logical, extended = true)
     spark.sessionState.executePlan(explain).executedPlan.executeCollect().foreach {
       r => assert(!List("testPass", "testUser").exists(r.toString.contains))
+    }
+  }
+
+  test("hide credentials in create and describe a persistent/temp table") {
+    val password = "testPass"
+    val tableName = "tab1"
+    Seq("TABLE", "TEMPORARY VIEW").foreach { tableType =>
+      withTable(tableName) {
+        val df = sql(
+          s"""
+             |CREATE $tableType $tableName
+             |USING org.apache.spark.sql.jdbc
+             |OPTIONS (
+             | url '$urlWithUserAndPass',
+             | dbtable 'TEST.PEOPLE',
+             | user 'testUser',
+             | password '$password')
+           """.stripMargin)
+
+        val explain = ExplainCommand(df.queryExecution.logical, extended = true)
+        spark.sessionState.executePlan(explain).executedPlan.executeCollect().foreach { r =>
+          assert(!r.toString.contains(password))
+        }
+
+        sql(s"DESC FORMATTED $tableName").collect().foreach { r =>
+          assert(!r.toString().contains(password))
+        }
+
+        sql(s"DESC EXTENDED $tableName").collect().foreach { r =>
+          assert(!r.toString().contains(password))
+        }
+      }
     }
   }
 
@@ -788,7 +850,7 @@ class JDBCSuite extends SparkFunSuite
 
   test("SPARK-16387: Reserved SQL words are not escaped by JDBC writer") {
     val df = spark.createDataset(Seq("a", "b", "c")).toDF("order")
-    val schema = JdbcUtils.schemaString(df, "jdbc:mysql://localhost:3306/temp")
+    val schema = JdbcUtils.schemaString(df.schema, "jdbc:mysql://localhost:3306/temp")
     assert(schema.contains("`order` TEXT"))
   }
 }
