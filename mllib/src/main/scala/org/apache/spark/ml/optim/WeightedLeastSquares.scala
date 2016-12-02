@@ -117,7 +117,7 @@ private[ml] class WLSMatrix (
     val diagInvAtWA = new DenseVector((1 to m).map {
       i => atwaDense.apply(i-1, i-1) / wSum }.toArray)
 
-    new WeightedLeastSquaresModel(coefficients, intercept, diagInvAtWA)
+    new WeightedLeastSquaresModel(coefficients, intercept, diagInvAtWA, Array(0D))
 
   }
 }

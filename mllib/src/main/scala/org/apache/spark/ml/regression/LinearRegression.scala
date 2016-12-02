@@ -239,7 +239,6 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
           IndexedRow(index, labelVector)
       }
       val B = new IndexedRowMatrix(Br).toBlockMatrix()
-     // val t1 = System.nanoTime()
       val optimizerM = new WLSMatrix($(fitIntercept), $(regParam), $(standardization), true)
       val modelM = optimizerM.fit(A, B, W, bStd, aVar, wSum)
       val lrM = copyValues(new LinearRegressionModel(uid, modelM.coefficients, modelM.intercept))
@@ -251,10 +250,9 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
         $(featuresCol),
         summaryModel,
         modelM.diagInvAtWA.toArray,
-        Array(0D))
-     // val t2 = System.nanoTime()
-      return lrM.setSummary(trainingSummary)
-/*
+        modelM.objectiveHistory)
+      return lrM.setSummary(Some(trainingSummary))
+      /*
       val instances: RDD[Instance] = dataset.select(
         col($(labelCol)).cast(DoubleType), w, col($(featuresCol))).rdd.map {
           case Row(label: Double, weight: Double, features: Vector) =>
@@ -282,6 +280,7 @@ class LinearRegression @Since("1.3.0") (@Since("1.3.0") override val uid: String
         model.objectiveHistory)
 
       return lrModel.setSummary(Some(trainingSummary))
+      */
     }
 
     val handlePersistence = dataset.rdd.getStorageLevel == StorageLevel.NONE

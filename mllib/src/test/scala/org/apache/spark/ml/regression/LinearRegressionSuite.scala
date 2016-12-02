@@ -54,7 +54,7 @@ class LinearRegressionSuite
     datasetWithDenseFeatureWithoutIntercept = sc.parallelize(
       LinearDataGenerator.generateLinearInput(
         intercept = 0.0, weights = Array(4.7, 7.2), xMean = Array(0.9, -1.3),
-        xVariance = Array(0.7, 1.2), nPoints = 20000, seed, eps = 0.1), 2).map(_.asML))
+        xVariance = Array(0.7, 1.2), nPoints = 10000, seed, eps = 0.1), 2).map(_.asML).toDF()
 
    // val dataSet = LinearDataGenerator.generateLinearInput(
    //   intercept = 0.0, weights = Array(4.7, 7.2), xMean = Array(0.9, -1.3),
@@ -135,6 +135,7 @@ class LinearRegressionSuite
     ParamsSuite.checkParams(model)
   }
 
+/*
   test("linear regression: default params") {
     val lir = new LinearRegression
     assert(lir.getLabelCol === "label")
@@ -242,7 +243,7 @@ class LinearRegressionSuite
       }
     }
   }
-
+*/
   test("linear regression without intercept without regularization") {
     Seq("auto", "l-bfgs", "normal").foreach { solver =>
       val trainer1 = (new LinearRegression).setFitIntercept(false).setSolver(solver)
