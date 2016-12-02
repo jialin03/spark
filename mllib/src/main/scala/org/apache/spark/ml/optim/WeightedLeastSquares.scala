@@ -43,6 +43,12 @@ private[ml] class WeightedLeastSquaresModel(
   }
 }
 
+// A*X = B
+// A: feature, B: lable, x: coefficient
+// regParam: parameter when fitting with regularization
+// standardizeFeature: if true, will compute the variance of A, aVar
+// standardizeLabel: if true, will compute the standard deviation of B, bStd
+
 private[ml] class WLSMatrix (
   val fitIntercept: Boolean, val regParam: Double, val standardizeFeatures: Boolean,
   val standardizeLabel: Boolean) extends Logging with Serializable {
@@ -52,13 +58,16 @@ private[ml] class WLSMatrix (
     logWarning("regParam is zero, which might cause numerical instability and overfitting.")
   }
 
+  // Weighted Least Square Model in matrix form: X=(A^T*W*A+V)^(-1)*(A^T*W*B)
+  // V=regParam/bStd*(aVar^(-1)*aVar)
+  // X will be solved by Cholesky Decomposition in the last step
   def fit(A: BlockMatrix, B: BlockMatrix, W: BlockMatrix,
                      bStd: Double, aVar: Vector, wSum: Double): WeightedLeastSquaresModel = {
 
     val AW = A.elementWiseMultiplyOneCol(W)
     val BW = B.elementWiseMultiplyOneCol(W)
-    val atwa = A.transMultiply(AW).toLocalMatrix()  // m*m feature matrix
-    val atwb = A.transMultiply(BW).toLocalMatrix()  // m*1 label matrix
+    val atwa = A.transMultiply(AW).toLocalMatrix()  // m*m feature matrix A^T*W*A
+    val atwb = A.transMultiply(BW).toLocalMatrix()  // m*1 label matrix A^T*W*B
     val atwaDense = new DenseMatrix(atwa.numRows, atwa.numCols, atwa.toArray)
     val atwbDense = new DenseMatrix(atwb.numRows, atwb.numCols, atwb.toArray)
     val m = aVar.size
@@ -102,6 +111,9 @@ private[ml] class WLSMatrix (
     }
 
     val x = CholeskyDecomposition.solve(aTri, bArr)  // x is the coefficients array
+
+    // if fitIntercept, there should be one column of "1" in the first column of A
+    // if fitIntercept. the first point of X should be the intercept, otherwise it is 0.0
     val (coefficients, intercept) = if (fitIntercept) {
       (new DenseVector(x.slice(1, x.length)), x.head)
     } else {

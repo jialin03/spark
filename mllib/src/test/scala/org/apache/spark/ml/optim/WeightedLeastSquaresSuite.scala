@@ -236,6 +236,9 @@ class WeightedLeastSquaresSuite extends SparkFunSuite with MLlibTestSparkContext
     val wSum = 10.0
 
     val wls = new WLSMatrix(false, 0.0, false, false).fit(A, B, W, bStd, aVar, wSum)
+    // fitIntercept: Boolean, regParam: Double
+    // standardizeFeatures: Boolean, standardizeLabel: Boolean
+
     val actual = Vectors.dense(wls.intercept, wls.coefficients(0), wls.coefficients(1))
     assert(actual ~== expect absTol 1e-3)
 
